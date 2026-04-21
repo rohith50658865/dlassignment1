@@ -37,7 +37,7 @@ Instructions
 # =============================================================================
 # >>>  SET YOUR STUDENT ID HERE  <<<
 # =============================================================================
-STUDENT_ID = 0          # TODO: replace 0 with your numeric student ID
+STUDENT_ID = 50658865          # TODO: replace 0 with your numeric student ID
 # =============================================================================
 
 import argparse
