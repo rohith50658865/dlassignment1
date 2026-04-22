@@ -378,9 +378,9 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
+            nn.Linear(embed_dim, int(embed_dim * mlp_dim)),
             nn.GELU(),
-            nn.Linear(int(embed_dim * mlp_ratio), embed_dim),
+            nn.Linear(int(embed_dim * mlp_dim), embed_dim),
             nn.Dropout(dropout)
 )
 
@@ -510,8 +510,8 @@ class VisionTransformer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
 
         self.blocks = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads, mlp_ratio, dropout)
-            for _ in range(depth)
+            TransformerBlock(embed_dim, num_heads, mlp_dim, dropout)
+            for _ in range(num_layers)
         ])
 
         self.norm = nn.LayerNorm(embed_dim)
@@ -1160,4 +1160,24 @@ Modes
 
 
 if __name__ == "__main__":
-    main()
+    import torch
+
+    print("Testing Vision Transformer...")
+
+    x = torch.randn(2, 3, 32, 32)
+
+    model = VisionTransformer(
+        img_size=32,
+        patch_size=4,
+        in_chans=3,
+        num_classes=10,
+        embed_dim=64,
+        num_heads=2,
+        num_layers=4,
+        mlp_dim=128,
+        dropout=0.0
+    )
+
+    out = model(x)
+
+    print("Output shape:", out.shape)
