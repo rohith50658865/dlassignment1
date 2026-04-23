@@ -800,7 +800,7 @@ def train_model(
             # Move to device (CPU in this case)
             images = images
             labels = labels
-            
+
             # Forward pass
             logits, _ = model(images)
             
@@ -1109,7 +1109,7 @@ def compute_attention_entropy(
         
         result[f"layer_{layer_idx}"] = round(entropy, 4)
     
-    # Write output
+    
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(result, f, indent=2)
