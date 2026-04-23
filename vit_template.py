@@ -664,7 +664,7 @@ def get_cifar10_subset(
     for c in range(num_classes):
         class_indices = np.where(targets == c)[0]
 
-        np.random.seed(get_seed() + c)
+        np.random.seed(get_seed())
         chosen = np.random.choice(
             class_indices,
             samples_per_class,
@@ -1064,7 +1064,57 @@ def compute_attention_entropy(
     • os.makedirs(os.path.dirname(output_path), exist_ok=True) before writing.
     """
     # TODO 3.1 -- Implement attention entropy computation.
-    raise NotImplementedError("TODO 3.1: implement compute_attention_entropy")
+    set_all_seeds(get_seed())
+    
+    # Load model
+    model = _load_baseline_checkpoint(checkpoint_path)
+    
+    # Load test data
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+    
+    # Initialize accumulator for each layer
+    num_layers = len(model.blocks)
+    layer_cls_attentions = [[] for _ in range(num_layers)]
+    
+    # Forward pass through test set
+    with torch.no_grad():
+        for images, labels in test_loader:
+            logits, attn_list = model(images)
+            
+            # For each layer, extract CLS token attention (row 0)
+            for layer_idx, attn in enumerate(attn_list):
+                # attn shape: (B, h, T, T)
+                # We want the CLS row: (B, h, T)
+                cls_attn = attn[:, :, 0, :]  # (B, h, T)
+                layer_cls_attentions[layer_idx].append(cls_attn)
+    
+    # Compute entropy for each layer
+    result = {}
+    eps = 1e-9
+    
+    for layer_idx in range(num_layers):
+        # Concatenate all batches: list of (B, h, T) -> (total_B, h, T)
+        all_cls_attn = torch.cat(layer_cls_attentions[layer_idx], dim=0)
+        
+        # Average over images and heads: (total_B, h, T) -> (T,)
+        mean_attn = all_cls_attn.mean(dim=0).mean(dim=0)  # Average over batch and heads
+        
+        # Normalize to ensure it's a probability distribution
+        mean_attn = mean_attn / mean_attn.sum()
+        
+        # Compute Shannon entropy
+        p = torch.clamp(mean_attn, eps, 1.0)
+        entropy = -(p * torch.log2(p)).sum().item()
+        
+        result[f"layer_{layer_idx}"] = round(entropy, 4)
+    
+    # Write output
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+    
+    return result
 
 
 def compute_pos_embed_correlation(
@@ -1114,7 +1164,55 @@ def compute_pos_embed_correlation(
     • num_pairs = N * (N - 1) // 2
     """
     # TODO 3.2 -- Implement positional embedding correlation.
-    raise NotImplementedError("TODO 3.2: implement compute_pos_embed_correlation")
+    set_all_seeds(get_seed())
+    
+    # Load model
+    model = _load_baseline_checkpoint(checkpoint_path)
+    
+    # Extract positional embeddings and discard CLS token
+    pos_embed = model.pos_embed.data  # shape (1, N+1, D)
+    patch_embed = pos_embed[0, 1:, :]  # shape (N, D)
+    
+    N = patch_embed.shape[0]
+    patch_size = model.config["patch_size"]
+    G = 32 // patch_size  # Number of patches per side
+    
+    # 1. Compute cosine similarity matrix
+    normed = F.normalize(patch_embed, dim=-1)  # (N, D)
+    similarity = normed @ normed.T  # (N, N)
+    
+    # 2. Compute 2D grid coordinates for each patch
+    coords = []
+    for k in range(N):
+        row = k // G
+        col = k % G
+        coords.append([row, col])
+    coords = torch.tensor(coords, dtype=torch.float32)  # (N, 2)
+    
+    # 3. Compute pairwise Euclidean distance matrix
+    diff = coords[:, None, :] - coords[None, :, :]  # (N, N, 2)
+    euclidean_dist = diff.norm(dim=-1)  # (N, N)
+    
+    # 4. Extract upper triangle (excluding diagonal)
+    triu_indices = torch.triu_indices(N, N, offset=1)
+    sim_upper = similarity[triu_indices[0], triu_indices[1]].numpy()
+    dist_upper = euclidean_dist[triu_indices[0], triu_indices[1]].numpy()
+    
+    # 5. Compute Pearson correlation
+    pearson_r = np.corrcoef(sim_upper, dist_upper)[0, 1]
+    num_pairs = N * (N - 1) // 2
+    
+    result = {
+        "pearson_r": round(float(pearson_r), 4),
+        "num_pairs": num_pairs
+    }
+    
+    # Write output
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+    
+    return result
 
 
 def compute_per_class_accuracy(
@@ -1327,8 +1425,4 @@ Modes
 
 
 if __name__ == "__main__":
-    result = get_cifar10_subset()
-    print("RETURN VALUE:", result)
-
-    print("Train subset size:", len(train_subset))
-    print("Test size:", len(test_dataset))
+    main()
