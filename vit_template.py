@@ -1255,7 +1255,58 @@ def compute_per_class_accuracy(
       Diagonal entries are correct predictions; off-diagonal are confusions.
     """
     # TODO 3.3 -- Implement per-class accuracy and confusion analysis.
-    raise NotImplementedError("TODO 3.3: implement compute_per_class_accuracy")
+    set_all_seeds(get_seed())
+
+    model = _load_baseline_checkpoint(checkpoint_path)
+
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+    num_classes = 10
+    conf = torch.zeros(num_classes, num_classes, dtype=torch.long)
+
+    model.eval()
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            logits, _ = model(images)
+            preds = logits.argmax(dim=1)
+
+            for t, p in zip(labels, preds):
+                conf[t.item(), p.item()] += 1
+
+    # Per-class accuracy
+    class_accuracies = {}
+    for c in range(num_classes):
+        correct = conf[c, c].item()
+        total = conf[c].sum().item()
+        acc = correct / total if total > 0 else 0.0
+        class_accuracies[str(c)] = round(acc, 4)
+
+    # Top-3 confusions (exclude diagonal)
+    conf_copy = conf.clone()
+    for i in range(num_classes):
+        conf_copy[i, i] = 0
+
+    flat = conf_copy.flatten()
+    topk = torch.topk(flat, 3)
+
+    top3_confusions = []
+    for idx, count in zip(topk.indices, topk.values):
+        true = idx // num_classes
+        pred = idx % num_classes
+        top3_confusions.append([int(true), int(pred), int(count)])
+
+    result = {
+        "class_accuracies": class_accuracies,
+        "top3_confusions": top3_confusions
+    }
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    return result
 
 
 def compute_attention_distance(
@@ -1306,7 +1357,60 @@ def compute_attention_distance(
       Then .mean(dim=-1) → (B, h), then .mean() for the scalar.
     """
     # TODO 3.4 -- Implement mean attention distance computation.
-    raise NotImplementedError("TODO 3.4: implement compute_attention_distance")
+
+    set_all_seeds(get_seed())
+
+    model = _load_baseline_checkpoint(checkpoint_path)
+
+    _, test_dataset = get_cifar10_subset()
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+    patch_size = model.config["patch_size"]
+    G = 32 // patch_size
+    N = G * G
+
+    # Precompute grid coords and distance matrix
+    coords = torch.tensor(
+        [(i // G, i % G) for i in range(N)],
+        dtype=torch.float32
+    )
+
+    diff = coords[:, None, :] - coords[None, :, :]
+    D_grid = diff.norm(dim=-1)  # (N, N)
+
+    num_layers = len(model.blocks)
+    layer_vals = [[] for _ in range(num_layers)]
+
+    model.eval()
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            _, attn_list = model(images)
+
+            for l, attn in enumerate(attn_list):
+                # (B, h, T, T)
+                patch_attn = attn[:, :, 1:, 1:]  # remove CLS → (B,h,N,N)
+
+                B, h, _, _ = patch_attn.shape
+
+                # normalize rows
+                patch_attn = patch_attn / patch_attn.sum(dim=-1, keepdim=True).clamp(min=1e-9)
+
+                # compute distance
+                dist = (patch_attn * D_grid).sum(dim=-1)  # (B,h,N)
+
+                dist = dist.mean(dim=-1)  # (B,h)
+                layer_vals[l].append(dist.mean().item())
+
+    result = {}
+    for i in range(num_layers):
+        result[f"layer_{i}"] = round(float(np.mean(layer_vals[i])), 4)
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+
+    return result
 
 
 # =============================================================================
