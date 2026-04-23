@@ -378,11 +378,12 @@ class TransformerBlock(nn.Module):
         self.norm2 = nn.LayerNorm(embed_dim)
 
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, int(embed_dim * mlp_dim)),
+            nn.Linear(embed_dim, mlp_dim),
             nn.GELU(),
-            nn.Linear(int(embed_dim * mlp_dim), embed_dim),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, embed_dim),
             nn.Dropout(dropout)
-)
+        )
 
     def forward(
         self, x: torch.Tensor
@@ -398,14 +399,13 @@ class TransformerBlock(nn.Module):
         #     x           = x + self.mlp(self.norm2(x))
         #
         #   Return (x, attn_weights).
-        attn_out, _ = self.attn(self.norm1(x))
+        normed = self.norm1(x)
+        attn_out, attn_weights = self.attn(normed)
         x = x + attn_out
 
-        
-        mlp_out = self.mlp(self.norm2(x))
-        x = x + mlp_out
+        x = x + self.mlp(self.norm2(x))
 
-        return x
+        return x, attn_weights
 
 
 # ---------------------------------------------------------------------------
@@ -530,15 +530,17 @@ class VisionTransformer(nn.Module):
 
         x = x + self.pos_embed
 
+        attn_list = []
         for block in self.blocks:
-            x = block(x)
+            x, attn = block(x)
+            attn_list.append(attn)
 
         x = self.norm(x)
 
         cls_output = x[:, 0]
         logits = self.head(cls_output)
 
-        return logits
+        return logits, attn_list
 
 
 # =============================================================================
@@ -580,6 +582,7 @@ def build_model(config: Dict, num_classes: int = 10) -> VisionTransformer:
 def get_cifar10_subset(
     data_root: str = "./data",
 ) -> Tuple[Subset, datasets.CIFAR10]:
+    print("FUNCTION STARTED")   
     """
     Load CIFAR-10 and return a class-balanced training subset plus the full
     test set.
@@ -626,8 +629,53 @@ def get_cifar10_subset(
     #   3. call set_all_seeds(get_seed()) before any sampling.
     #   4. For each class 0-9, collect its indices in the training set,
     #      then randomly sample 500 of them.
-    #   5. Return (Subset(train_dataset, selected_indices), test_dataset).
-    raise NotImplementedError("TODO 1.5: implement get_cifar10_subset")
+    #   5. Return (Subset(train_dataset, selected_indices), test_dataset)
+        # set seed FIRST (important for grading)
+    set_all_seeds(get_seed())
+
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=(0.4914, 0.4822, 0.4465),
+            std=(0.2470, 0.2435, 0.2616)
+        )
+    ])
+
+    train_dataset = datasets.CIFAR10(
+        root=data_root,
+        train=True,
+        download=True,
+        transform=transform
+    )
+
+    test_dataset = datasets.CIFAR10(
+        root=data_root,
+        train=False,
+        download=True,
+        transform=transform
+    )
+
+    num_classes = 10
+    samples_per_class = 500
+
+    targets = np.array(train_dataset.targets)
+    selected_indices = []
+
+    for c in range(num_classes):
+        class_indices = np.where(targets == c)[0]
+
+        np.random.seed(get_seed() + c)
+        chosen = np.random.choice(
+            class_indices,
+            samples_per_class,
+            replace=False
+        )
+
+        selected_indices.extend(chosen)
+
+    train_subset = Subset(train_dataset, selected_indices)
+    print("ABOUT TO RETURN") 
+    return train_subset, test_dataset    
 
 
 def train_model(
@@ -708,7 +756,126 @@ def train_model(
     • Create checkpoint_dir if it doesn't exist: os.makedirs(..., exist_ok=True)
     """
     # TODO 1.6 ── Implement the training loop.
-    raise NotImplementedError("TODO 1.6: implement train_model")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_subset, 
+        batch_size=config["batch_size"],
+        shuffle=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=256,
+        shuffle=False
+    )
+    
+    # Setup optimizer and learning rate schedule
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config["lr"],
+        weight_decay=1e-4
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config["epochs"]
+    )
+    
+    # Count total trainable parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Initialize history
+    history = []
+    
+    # Training loop
+    for epoch in range(1, config["epochs"] + 1):
+        epoch_start = time.time()
+        
+        # Training phase
+        model.train()
+        train_loss_sum = 0.0
+        train_batch_count = 0
+        
+        for batch_idx, (images, labels) in enumerate(train_loader):
+            # Move to device (CPU in this case)
+            images = images
+            labels = labels
+            
+            # Forward pass
+            logits, _ = model(images)
+            
+            # Compute loss
+            loss = F.cross_entropy(logits, labels)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            train_loss_sum += loss.item()
+            train_batch_count += 1
+        
+        train_loss = train_loss_sum / train_batch_count
+        
+        # Validation phase
+        model.eval()
+        correct = 0
+        total = 0
+        
+        with torch.no_grad():
+            for images, labels in test_loader:
+                logits, _ = model(images)
+                predictions = logits.argmax(dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+        
+        val_accuracy = correct / total
+        
+        # Step the learning rate scheduler
+        scheduler.step()
+        
+        # Measure epoch time
+        epoch_time = time.time() - epoch_start
+        
+        # Record epoch results
+        epoch_record = {
+            "epoch": epoch,
+            "train_loss": round(train_loss, 4),
+            "val_accuracy": round(val_accuracy, 4),
+            "epoch_time_sec": round(epoch_time, 4)
+        }
+        history.append(epoch_record)
+        
+        # Save checkpoint if needed
+        if epoch in checkpoint_epochs:
+            checkpoint = {
+                "model_state_dict": model.state_dict(),
+                "config": model.config,
+                "epoch": epoch,
+                "student_id": STUDENT_ID,
+            }
+            checkpoint_path = os.path.join(checkpoint_dir, f"baseline_epoch_{epoch}.pt")
+            torch.save(checkpoint, checkpoint_path)
+        
+        print(f"[Epoch {epoch:2d}] train_loss={train_loss:.4f}, val_acc={val_accuracy:.4f}, time={epoch_time:.2f}s")
+    
+    # Create final log dictionary
+    log = {
+        "student_id": STUDENT_ID,
+        "seed": get_seed(),
+        "config": config,
+        "history": history,
+        "final_val_accuracy": round(history[-1]["val_accuracy"], 4),
+        "total_params": total_params
+    }
+    
+    # Write log to file if specified
+    if log_path is not None:
+        os.makedirs(os.path.dirname(log_path) if os.path.dirname(log_path) else ".", exist_ok=True)
+        with open(log_path, "w") as f:
+            json.dump(log, f, indent=2)
+    
+    return log
 
 
 # =============================================================================
@@ -1160,24 +1327,8 @@ Modes
 
 
 if __name__ == "__main__":
-    import torch
+    result = get_cifar10_subset()
+    print("RETURN VALUE:", result)
 
-    print("Testing Vision Transformer...")
-
-    x = torch.randn(2, 3, 32, 32)
-
-    model = VisionTransformer(
-        img_size=32,
-        patch_size=4,
-        in_chans=3,
-        num_classes=10,
-        embed_dim=64,
-        num_heads=2,
-        num_layers=4,
-        mlp_dim=128,
-        dropout=0.0
-    )
-
-    out = model(x)
-
-    print("Output shape:", out.shape)
+    print("Train subset size:", len(train_subset))
+    print("Test size:", len(test_dataset))
